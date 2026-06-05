@@ -28,4 +28,5 @@ jobs:
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           UNIVERSE: sp500
+          STRATEGY: fresh_breakout
         run: python scan_alert.py
