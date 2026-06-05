@@ -92,7 +92,7 @@ with st.sidebar:
         "🎯 Strategy",
         list(STRATEGIES.keys()),
         format_func=lambda k: STRATEGIES[k]["thai_label"],
-        index=1,  # fresh_breakout เป็น default
+        index=0,  # near_52w_high (backtest ดีกว่า — ดู compare_strategies.py)
     )
     strategy = STRATEGIES[strategy_key]
     st.caption(strategy["description"])
