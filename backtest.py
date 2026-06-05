@@ -1,13 +1,14 @@
-"""Backtest Fresh Breakout strategy on historical data.
+"""Backtest กลยุทธ์ใดก็ได้บนข้อมูลย้อนหลัง.
 
 Usage:
-  python backtest.py                 # Default: Nasdaq 100, 5 years
-  UNIVERSE=sp500 python backtest.py  # หรือ S&P 500 (ช้ามาก)
-  YEARS=3 python backtest.py         # ปรับช่วงเวลา
+  python backtest.py                              # default: fresh_breakout, Nasdaq 100, 5y
+  STRATEGY=near_52w_high python backtest.py       # เปลี่ยนกลยุทธ์
+  UNIVERSE=sp500 python backtest.py               # เปลี่ยน universe (ช้ามาก)
+  YEARS=3 python backtest.py                      # ปรับช่วงเวลา
 
-Outputs:
-  - trades.csv      : ทุก trade ที่เกิดขึ้น
-  - backtest.html   : สรุปสถิติ + equity curve
+Outputs (เปลี่ยนชื่อตาม strategy):
+  - trades_<strategy>.csv  : ทุก trade
+  - backtest_<strategy>.html : สรุปสถิติ
 """
 import os
 from datetime import datetime
@@ -34,32 +35,49 @@ def get_universe() -> tuple[str, list[str]]:
 
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Add all indicators needed for Fresh Breakout signal detection."""
+    """Add ทุก indicator ที่ใช้ในทั้ง 2 กลยุทธ์ + simulate_trade."""
     df = df.copy()
     df["SMA50"] = df["Close"].rolling(50).mean()
     df["SMA200"] = df["Close"].rolling(200).mean()
     df["SMA200_lag20"] = df["SMA200"].shift(20)
     df["VolSMA50"] = df["Volume"].rolling(50).mean()
+    df["High52"] = df["High"].rolling(252).max()
+    df["Low52"] = df["Low"].rolling(252).min()
     # Base = 30 วันก่อนหน้า (ไม่นับวันนี้ — shift 1)
     df["BaseHigh"] = df["High"].shift(1).rolling(30).max()
     df["BaseLow"] = df["Low"].shift(1).rolling(30).min()
     df["BaseRange"] = (df["BaseHigh"] - df["BaseLow"]) / df["BaseLow"] * 100
-    df["Low52"] = df["Low"].rolling(252).min()
     return df
 
 
-def find_signal_dates(df: pd.DataFrame) -> pd.DatetimeIndex:
-    """Vectorized signal detection — returns all dates matching all 7 conditions."""
+def find_signals_fresh_breakout(df: pd.DataFrame) -> pd.DatetimeIndex:
+    """Fresh Breakout — 7 เงื่อนไข (Stage 2 + tight base + breakout + fresh + vol)."""
     c = (
-        (df["Close"] > df["SMA50"]) & (df["SMA50"] > df["SMA200"]) &  # uptrend
-        (df["SMA200"] > df["SMA200_lag20"]) &                        # rising
-        (df["BaseRange"] < 15) &                                      # tight base
-        (df["Close"] > df["BaseHigh"]) &                              # breakout
-        (df["Close"] < df["BaseHigh"] * 1.05) &                       # fresh
-        (df["Volume"] > df["VolSMA50"] * 1.5) &                       # vol surge
-        (df["Close"] > df["Low52"] * 1.30)                            # above 52W low
+        (df["Close"] > df["SMA50"]) & (df["SMA50"] > df["SMA200"]) &
+        (df["SMA200"] > df["SMA200_lag20"]) &
+        (df["BaseRange"] < 15) &
+        (df["Close"] > df["BaseHigh"]) &
+        (df["Close"] < df["BaseHigh"] * 1.05) &
+        (df["Volume"] > df["VolSMA50"] * 1.5) &
+        (df["Close"] > df["Low52"] * 1.30)
     )
     return df.index[c.fillna(False)]
+
+
+def find_signals_near_52w_high(df: pd.DataFrame) -> pd.DatetimeIndex:
+    """Near 52W High — ครบ 3 เงื่อนไข."""
+    c = (
+        (df["Close"] > df["SMA200"]) &
+        (df["Close"] >= df["High52"] * 0.99) &
+        (df["Volume"] > df["VolSMA50"])
+    )
+    return df.index[c.fillna(False)]
+
+
+SIGNAL_FUNCS = {
+    "fresh_breakout": find_signals_fresh_breakout,
+    "near_52w_high": find_signals_near_52w_high,
+}
 
 
 def simulate_trade(df: pd.DataFrame, signal_idx: int) -> dict | None:
@@ -76,9 +94,13 @@ def simulate_trade(df: pd.DataFrame, signal_idx: int) -> dict | None:
     for offset in range(1, MAX_HOLD_DAYS + 1):
         bar_idx = entry_idx + offset
         if bar_idx >= len(df):
-            # หมดข้อมูล — exit ที่ close ล่าสุด
-            exit_idx = len(df) - 1
-            exit_price = float(df.iloc[exit_idx]["Close"])
+            # หมดข้อมูล — หา close ล่าสุดที่ไม่ใช่ NaN
+            valid = df["Close"].dropna()
+            if valid.empty:
+                return None
+            exit_date = valid.index[-1]
+            exit_idx = df.index.get_loc(exit_date)
+            exit_price = float(valid.iloc[-1])
             exit_reason = "EOD"
             break
 
@@ -121,12 +143,12 @@ def simulate_trade(df: pd.DataFrame, signal_idx: int) -> dict | None:
     }
 
 
-def backtest_ticker(ticker: str, df: pd.DataFrame) -> list[dict]:
+def backtest_ticker(ticker: str, df: pd.DataFrame, find_signals) -> list[dict]:
     """Run backtest on one ticker. No overlapping positions allowed."""
     if len(df) < 252:
         return []
     df = compute_indicators(df)
-    signals = find_signal_dates(df)
+    signals = find_signals(df)
     trades = []
     skip_until_idx = -1
     for sig_date in signals:
@@ -165,6 +187,10 @@ def fetch_history(tickers: list[str], years: int) -> dict[str, pd.DataFrame]:
 
 
 def compute_metrics(trades_df: pd.DataFrame) -> dict:
+    if trades_df.empty:
+        return {"n_trades": 0}
+    # ทิ้ง trades ที่มี NaN (ถ้ามี) เพื่อไม่ให้ stats เพี้ยน
+    trades_df = trades_df.dropna(subset=["return_pct"])
     if trades_df.empty:
         return {"n_trades": 0}
     rets = trades_df["return_pct"].values
@@ -255,45 +281,58 @@ Exits: -7% stop / Close &lt; SMA50 / Max 60 days / Cost 0.2% round-trip<br>
 </body></html>"""
 
 
-def main():
-    years = int(os.environ.get("YEARS", "5"))
-    universe_name, universe = get_universe()
-    print(f"=== Backtest: Fresh Breakout, {universe_name}, {years}y ===\n")
-
-    data = fetch_history(universe, years)
-
+def run_backtest(strategy_key: str, data: dict, universe_name: str, years: int) -> tuple[pd.DataFrame, dict]:
+    """Run a single strategy across all tickers. Returns (trades_df, metrics)."""
+    find_signals = SIGNAL_FUNCS[strategy_key]
     all_trades = []
     for i, (ticker, df) in enumerate(data.items(), 1):
         try:
-            trades = backtest_ticker(ticker, df)
+            trades = backtest_ticker(ticker, df, find_signals)
             all_trades.extend(trades)
             if i % 20 == 0:
-                print(f"  processed {i}/{len(data)}  ({len(all_trades)} trades so far)")
+                print(f"  [{strategy_key}] {i}/{len(data)}  ({len(all_trades)} trades)")
         except Exception as e:
             print(f"  [warn] {ticker}: {e}")
 
-    print(f"\nTotal trades: {len(all_trades)}")
     if not all_trades:
-        print("No trades generated.")
-        return
+        return pd.DataFrame(), {"n_trades": 0}
 
     trades_df = pd.DataFrame(all_trades)
     trades_df = trades_df[["ticker", "entry_date", "exit_date", "entry_price",
                             "exit_price", "return_pct", "hold_days", "exit_reason"]]
-    trades_df.to_csv("trades.csv", index=False)
+    trades_df.to_csv(f"trades_{strategy_key}.csv", index=False)
 
     metrics = compute_metrics(trades_df)
+    return trades_df, metrics
+
+
+def main():
+    years = int(os.environ.get("YEARS", "5"))
+    strategy_key = os.environ.get("STRATEGY", "fresh_breakout")
+    if strategy_key not in SIGNAL_FUNCS:
+        print(f"[error] Unknown STRATEGY={strategy_key}. Choices: {list(SIGNAL_FUNCS.keys())}")
+        return
+    universe_name, universe = get_universe()
+    print(f"=== Backtest: {strategy_key}, {universe_name}, {years}y ===\n")
+
+    data = fetch_history(universe, years)
+    trades_df, metrics = run_backtest(strategy_key, data, universe_name, years)
+
+    print(f"\nTotal trades: {metrics['n_trades']}")
+    if metrics["n_trades"] == 0:
+        print("No trades generated.")
+        return
+
     print("\n--- Summary ---")
     for k, v in metrics.items():
         print(f"  {k}: {v}")
 
-    # Equity curve for HTML
     eq = (1 + trades_df.sort_values("entry_date")["return_pct"] / 100).cumprod()
     html = render_html(metrics, trades_df, universe_name, years, eq)
-    with open("backtest.html", "w", encoding="utf-8") as f:
+    with open(f"backtest_{strategy_key}.html", "w", encoding="utf-8") as f:
         f.write(html)
 
-    print(f"\n[OK] Wrote trades.csv ({len(trades_df)} rows) + backtest.html")
+    print(f"\n[OK] Wrote trades_{strategy_key}.csv ({len(trades_df)} rows) + backtest_{strategy_key}.html")
 
 
 if __name__ == "__main__":
