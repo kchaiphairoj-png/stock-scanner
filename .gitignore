@@ -3,6 +3,7 @@ __pycache__/
 .streamlit/
 .env
 last_scan.html
-backtest.html
-trades.csv
+backtest*.html
+compare.html
+trades*.csv
 *.log
