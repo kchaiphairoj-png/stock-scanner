@@ -41,16 +41,36 @@ SET50 = [
     "TTB.BK", "WHA.BK",
 ]
 
-# S&P 500 — เพื่อความเสถียร ใช้ pandas.read_html() ตอนรันจาก Wikipedia
+# S&P 500 — ดึงรายชื่อสดจาก GitHub-hosted CSV (เสถียรกว่า Wikipedia, ไม่ block UA)
 def get_sp500() -> list[str]:
-    import pandas as pd
-    try:
-        tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
-        symbols = tables[0]["Symbol"].astype(str).str.replace(".", "-", regex=False).tolist()
-        return symbols
-    except Exception:
-        # fallback ถ้า Wikipedia ดึงไม่ได้ — ใช้ Nasdaq 100 + Dow 30 แทน
-        return sorted(set(NASDAQ_100 + DOW_30))
+    import urllib.request
+    sources = [
+        # Primary: GitHub-maintained CSV ของ datasets community
+        ("https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv", "csv"),
+        # Fallback: Wikipedia (ส่ง UA จริงเพื่อเลี่ยง 403)
+        ("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies", "html"),
+    ]
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    for url, kind in sources:
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            text = urllib.request.urlopen(req, timeout=15).read().decode("utf-8")
+            if kind == "csv":
+                lines = text.strip().split("\n")[1:]  # skip header
+                symbols = [line.split(",")[0].strip() for line in lines]
+            else:
+                import pandas as pd
+                from io import StringIO
+                tables = pd.read_html(StringIO(text))
+                symbols = tables[0]["Symbol"].astype(str).tolist()
+            symbols = [s.replace(".", "-") for s in symbols if s]
+            if len(symbols) >= 400:  # sanity check — S&P 500 มี ~500 ตัว
+                return symbols
+        except Exception as e:
+            print(f"[warn] get_sp500 from {url[:50]}... failed: {e}")
+    # Last resort
+    print("[warn] all S&P 500 sources failed — falling back to Nasdaq 100 + Dow 30")
+    return sorted(set(NASDAQ_100 + DOW_30))
 
 
 PRESETS = {
