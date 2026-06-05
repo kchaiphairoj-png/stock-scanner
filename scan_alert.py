@@ -1,0 +1,208 @@
+"""Daily auto-scan + email alert. ออกแบบให้รันใน CI / cron.
+
+Env vars (จำเป็นสำหรับส่งอีเมล):
+  EMAIL_USER       Gmail address (ผู้ส่ง)
+  EMAIL_PASSWORD   Gmail App Password (16 ตัวอักษร ไม่ใช่ password ปกติ)
+  EMAIL_TO         อีเมลผู้รับ
+
+Optional:
+  UNIVERSE         "sp500" (default) | "nasdaq100" | "dow30" | comma-separated tickers
+"""
+import os
+import smtplib
+from datetime import datetime
+from email.message import EmailMessage
+
+import yfinance as yf
+import pandas as pd
+
+from presets import get_sp500, NASDAQ_100, DOW_30
+
+
+# ───────── Strategy (เหมือนกับ app.py) ─────────
+def fetch_many(tickers: tuple[str, ...]) -> dict[str, pd.DataFrame]:
+    if not tickers:
+        return {}
+    data = yf.download(
+        list(tickers), period="2y", interval="1d",
+        progress=False, auto_adjust=False, group_by="ticker", threads=True,
+    )
+    out: dict[str, pd.DataFrame] = {}
+    if len(tickers) == 1:
+        t = tickers[0]
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+        out[t] = data
+    else:
+        for t in tickers:
+            try:
+                df = data[t].dropna(how="all")
+                if not df.empty:
+                    out[t] = df
+            except KeyError:
+                pass
+    return out
+
+
+def analyze(df: pd.DataFrame) -> dict | None:
+    if df is None or df.empty or len(df) < 200:
+        return None
+    df = df.copy()
+    df["SMA200"] = df["Close"].rolling(200).mean()
+    df["High52"] = df["High"].rolling(252).max()
+    df["VolSMA50"] = df["Volume"].rolling(50).mean()
+
+    last = df.iloc[-1]
+    close = float(last["Close"])
+    sma200 = float(last["SMA200"]) if pd.notna(last["SMA200"]) else None
+    high52 = float(last["High52"]) if pd.notna(last["High52"]) else None
+    vol = float(last["Volume"])
+    vol_avg = float(last["VolSMA50"]) if pd.notna(last["VolSMA50"]) else None
+
+    above_sma200 = sma200 is not None and close > sma200
+    near_high = high52 is not None and close >= high52 * 0.99
+    vol_high = vol_avg is not None and vol > vol_avg
+
+    if above_sma200 and near_high and vol_high:
+        signal = "BUY"
+    elif sma200 is not None and close < sma200:
+        signal = "SELL/WAIT"
+    else:
+        signal = "HOLD/WAIT"
+
+    return {
+        "signal": signal, "close": close, "sma200": sma200,
+        "high52": high52, "vol": vol, "vol_avg": vol_avg,
+    }
+
+
+def get_universe() -> tuple[str, list[str]]:
+    spec = os.environ.get("UNIVERSE", "sp500").strip()
+    if spec.lower() == "sp500":
+        return "S&P 500", get_sp500()
+    if spec.lower() == "nasdaq100":
+        return "Nasdaq 100", NASDAQ_100
+    if spec.lower() == "dow30":
+        return "Dow 30", DOW_30
+    if "," in spec:
+        return "Custom", [t.strip().upper() for t in spec.split(",") if t.strip()]
+    return "S&P 500", get_sp500()
+
+
+def render_html(buys, hold, sell, nodata, universe_name) -> str:
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    if buys:
+        rows = ""
+        for b in buys:
+            pct_from_high = (b["close"] / b["high52"] - 1) * 100
+            pct_above_sma = (b["close"] / b["sma200"] - 1) * 100
+            vol_x = b["vol"] / b["vol_avg"]
+            rows += (
+                f"<tr>"
+                f"<td><b>{b['ticker']}</b></td>"
+                f"<td>${b['close']:.2f}</td>"
+                f"<td>{pct_from_high:+.2f}%</td>"
+                f"<td>{pct_above_sma:+.1f}%</td>"
+                f"<td>{vol_x:.2f}×</td>"
+                f"</tr>"
+            )
+        table = f"""
+        <table cellpadding="8" cellspacing="0" style="border-collapse:collapse;font-family:sans-serif;border:1px solid #ddd">
+          <thead style="background:#16a34a;color:white">
+            <tr>
+              <th style="border:1px solid #ddd">Ticker</th>
+              <th style="border:1px solid #ddd">Close</th>
+              <th style="border:1px solid #ddd">% from 52W H</th>
+              <th style="border:1px solid #ddd">% vs SMA200</th>
+              <th style="border:1px solid #ddd">Vol vs Avg</th>
+            </tr>
+          </thead>
+          <tbody style="background:white">{rows}</tbody>
+        </table>
+        """
+    else:
+        table = "<p style='color:#666'>วันนี้ไม่พบหุ้นที่เข้าเงื่อนไข BUY ครบทั้ง 3 ข้อ</p>"
+
+    return f"""<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;max-width:700px">
+  <h2 style="color:#1f2937">🚀 Stock Breakout Scan — {now}</h2>
+  <p>Universe: <b>{universe_name}</b> ({len(buys)+hold+sell+nodata} tickers)</p>
+  <p style="font-size:16px">
+    🟢 BUY: <b style="color:#16a34a">{len(buys)}</b> &nbsp;|&nbsp;
+    🟡 HOLD: {hold} &nbsp;|&nbsp;
+    🔴 SELL: {sell} &nbsp;|&nbsp;
+    ⚪ NO DATA: {nodata}
+  </p>
+  {table}
+  <hr style="margin-top:24px;border:none;border-top:1px solid #ddd">
+  <p style="color:#888;font-size:12px">
+    Auto-generated by Stock Breakout Scanner<br>
+    Strategy: Close &gt; SMA200 &nbsp;·&nbsp; Close ≥ 99% ของ 52W High &nbsp;·&nbsp; Volume &gt; VolSMA50
+  </p>
+</body></html>"""
+
+
+def send_email(html: str, subject: str):
+    user = os.environ["EMAIL_USER"]
+    password = os.environ["EMAIL_PASSWORD"]
+    to = os.environ["EMAIL_TO"]
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = user
+    msg["To"] = to
+    msg.set_content("View this email in HTML-capable client.")
+    msg.add_alternative(html, subtype="html")
+
+    with smtplib.SMTP("smtp.gmail.com", 587) as smtp:
+        smtp.starttls()
+        smtp.login(user, password)
+        smtp.send_message(msg)
+
+
+def main():
+    universe_name, universe = get_universe()
+    print(f"Universe: {universe_name} ({len(universe)} tickers)")
+
+    print("Downloading data...")
+    data = fetch_many(tuple(universe))
+    print(f"Got data for {len(data)} tickers")
+
+    buys, hold, sell, nodata = [], 0, 0, 0
+    for t in universe:
+        df = data.get(t)
+        if df is None or df.empty:
+            nodata += 1
+            continue
+        r = analyze(df)
+        if r is None:
+            nodata += 1
+            continue
+        if r["signal"] == "BUY":
+            buys.append({"ticker": t, **r})
+        elif r["signal"] == "HOLD/WAIT":
+            hold += 1
+        else:
+            sell += 1
+
+    # เรียง BUY ตาม %from 52W H มากไปน้อย (ใกล้ ATH สุดอยู่บน)
+    buys.sort(key=lambda b: b["close"] / b["high52"], reverse=True)
+
+    print(f"\nResults: BUY={len(buys)}  HOLD={hold}  SELL={sell}  NO DATA={nodata}")
+    if buys:
+        print("BUY tickers:", ", ".join(b["ticker"] for b in buys))
+
+    html = render_html(buys, hold, sell, nodata, universe_name)
+    subject = (f"🚀 Stock Scan — {len(buys)} BUY signal(s)" if buys
+               else "📊 Stock Scan — No BUY today")
+
+    if all(os.environ.get(k) for k in ("EMAIL_USER", "EMAIL_PASSWORD", "EMAIL_TO")):
+        send_email(html, subject)
+        print(f"\n[OK] Sent email to {os.environ['EMAIL_TO']}")
+    else:
+        with open("last_scan.html", "w", encoding="utf-8") as f:
+            f.write(html)
+        print("\n[DRY RUN] EMAIL env vars not set - HTML saved to last_scan.html")
+
+
+if __name__ == "__main__":
+    main()

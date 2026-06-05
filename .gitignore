@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.streamlit/
+.env
+last_scan.html
+*.log

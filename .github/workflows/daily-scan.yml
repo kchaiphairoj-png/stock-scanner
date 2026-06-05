@@ -1,0 +1,31 @@
+name: Daily Stock Scan
+
+on:
+  schedule:
+    # 22:00 UTC = 05:00 น. ไทย (ตลาด US ปิดแล้ว)
+    # cron Mon-Fri UTC = morning Tue-Sat ไทย
+    - cron: "0 22 * * 1-5"
+  workflow_dispatch:  # รัน manual ได้จากหน้า GitHub Actions
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install yfinance pandas lxml
+
+      - name: Run scan + email alert
+        env:
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          UNIVERSE: sp500
+        run: python scan_alert.py
