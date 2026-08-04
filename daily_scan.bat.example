@@ -1,0 +1,29 @@
+@echo off
+REM ────────────────────────────────────────────────────────────────────
+REM Daily Stock Scanner — Windows Batch File
+REM
+REM วิธีใช้:
+REM   1. Copy ไฟล์นี้เป็น daily_scan.bat (ลบ .example)
+REM   2. แก้ EMAIL_USER / EMAIL_PASSWORD / EMAIL_TO ด้านล่าง
+REM   3. ทดสอบรัน: double-click daily_scan.bat
+REM   4. ตั้ง Windows Task Scheduler ให้รันไฟล์นี้ทุกวัน 05:00 น.
+REM
+REM ⚠️  อย่า commit ไฟล์ daily_scan.bat (มี password ภายใน) ลง Git
+REM ────────────────────────────────────────────────────────────────────
+
+REM ─── Email config ───
+set EMAIL_USER=YOUR_EMAIL@gmail.com
+set EMAIL_PASSWORD=YOUR_APP_PASSWORD_16_CHARS
+set EMAIL_TO=YOUR_EMAIL@gmail.com
+
+REM ─── Scanner config ───
+set UNIVERSE=nasdaq100
+REM ตัวเลือก UNIVERSE: sp500 | nasdaq100 | dow30 | NVDA,AAPL,...
+
+set STRATEGY=minervini_tt,canslim
+REM ตัวเลือก STRATEGY: near_52w_high | fresh_breakout | minervini_tt | canslim | all
+REM แนะนำ "minervini_tt,canslim" — quality + momentum
+
+REM ─── Run ───
+cd /d "%~dp0"
+python scan_alert.py
